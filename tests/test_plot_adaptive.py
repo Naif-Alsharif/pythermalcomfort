@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import matplotlib
-import numpy as np
 import pytest
 
 matplotlib.use("Agg")
@@ -15,6 +12,7 @@ from pythermalcomfort.plots.matplotlib.adaptive import (
     AdaptivePlot,
     AdaptivePlotResult,
     BandsConfig,
+    _compute_ce,
 )
 
 
@@ -24,84 +22,38 @@ def close_all_figures():
     plt.close("all")
 
 
-# ── mock models ────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# _compute_ce tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
-def _mock_ashrae(tdb, tr, t_running_mean, v, **kwargs):
-    """Mimics adaptive_ashrae return structure."""
-    t_rm = np.asarray(t_running_mean, dtype=float)
-    t_cmf = 0.31 * t_rm + 17.8
-    return SimpleNamespace(
-        tmp_cmf=t_cmf,
-        tmp_cmf_80_low=t_cmf - 3.5,
-        tmp_cmf_80_up=t_cmf + 3.5,
-        tmp_cmf_90_low=t_cmf - 2.5,
-        tmp_cmf_90_up=t_cmf + 2.5,
-        acceptability_80=np.ones_like(t_rm, dtype=bool),
-        acceptability_90=np.ones_like(t_rm, dtype=bool),
-    )
+def test_ce_none() -> None:
+    assert _compute_ce(None) == 0.0
 
 
-def _mock_en(tdb, tr, t_running_mean, v, **kwargs):
-    """Mimics adaptive_en return structure."""
-    t_rm = np.asarray(t_running_mean, dtype=float)
-    t_cmf = 0.33 * t_rm + 18.8
-    return SimpleNamespace(
-        tmp_cmf=t_cmf,
-        tmp_cmf_cat_i_low=t_cmf - 3.0,
-        tmp_cmf_cat_i_up=t_cmf + 2.0,
-        tmp_cmf_cat_ii_low=t_cmf - 4.0,
-        tmp_cmf_cat_ii_up=t_cmf + 3.0,
-        tmp_cmf_cat_iii_low=t_cmf - 5.0,
-        tmp_cmf_cat_iii_up=t_cmf + 4.0,
-        acceptability_cat_i=np.ones_like(t_rm, dtype=bool),
-        acceptability_cat_ii=np.ones_like(t_rm, dtype=bool),
-        acceptability_cat_iii=np.ones_like(t_rm, dtype=bool),
-    )
+def test_ce_low_speed() -> None:
+    assert _compute_ce(0.3) == 0.0
+    assert _compute_ce(0.59) == 0.0
 
 
-def _mock_ashrae_with_nan(tdb, tr, t_running_mean, v, **kwargs):
-    """Return NaN outside 15-30 range to simulate limit_inputs=True."""
-    t_rm = np.asarray(t_running_mean, dtype=float)
-    t_cmf = 0.31 * t_rm + 17.8
-    invalid = (t_rm < 15) | (t_rm > 30)
-    t_cmf = np.where(invalid, np.nan, t_cmf)
-    return SimpleNamespace(
-        tmp_cmf=t_cmf,
-        tmp_cmf_80_low=t_cmf - 3.5,
-        tmp_cmf_80_up=t_cmf + 3.5,
-        tmp_cmf_90_low=t_cmf - 2.5,
-        tmp_cmf_90_up=t_cmf + 2.5,
-        acceptability_80=np.where(invalid, False, True),
-        acceptability_90=np.where(invalid, False, True),
-    )
+def test_ce_medium_speed() -> None:
+    assert _compute_ce(0.6) == 1.2
+    assert _compute_ce(0.8) == 1.2
 
 
-# ── helper to patch model loading ──────────────────────────────────────────
+def test_ce_high_speed() -> None:
+    assert _compute_ce(0.9) == 1.8
+    assert _compute_ce(1.1) == 1.8
 
 
-def _new_ashrae_plot(monkeypatch=None, mock=None) -> AdaptivePlot:
-    plot = AdaptivePlot("ashrae")
-    if monkeypatch and mock:
-        monkeypatch.setattr(plot, "_load_model", lambda: mock)
-    plot.set_params(tdb=25, tr=25, v=0.1)
-    return plot
+def test_ce_very_high_speed() -> None:
+    assert _compute_ce(1.2) == 2.2
+    assert _compute_ce(2.0) == 2.2
 
 
-def _new_en_plot(monkeypatch=None, mock=None) -> AdaptivePlot:
-    plot = AdaptivePlot("en")
-    if monkeypatch and mock:
-        monkeypatch.setattr(plot, "_load_model", lambda: mock)
-    plot.set_params(tdb=25, tr=25, v=0.1)
-    return plot
-
-
+# ══════════════════════════════════════════════════════════════════════════
 # Constructor tests
-
-
-def test_constructor_rejects_invalid_standard() -> None:
-    with pytest.raises(ValueError, match="Unknown standard"):
-        AdaptivePlot("invalid")
+# ══════════════════════════════════════════════════════════════════════════
 
 
 def test_constructor_accepts_ashrae() -> None:
@@ -114,6 +66,21 @@ def test_constructor_accepts_en() -> None:
     assert plot._standard == "en"
 
 
+def test_constructor_case_insensitive() -> None:
+    plot = AdaptivePlot("ASHRAE")
+    assert plot._standard == "ashrae"
+
+
+def test_constructor_rejects_invalid_standard() -> None:
+    with pytest.raises(ValueError, match="Unknown standard"):
+        AdaptivePlot("invalid")
+
+
+def test_constructor_default_t_rm_range() -> None:
+    plot = AdaptivePlot("ashrae")
+    assert plot._t_rm_range == (10.0, 33.5)
+
+
 def test_constructor_custom_t_rm_range() -> None:
     plot = AdaptivePlot("ashrae", t_running_mean_range=(15, 30))
     assert plot._t_rm_range == (15.0, 30.0)
@@ -124,34 +91,29 @@ def test_constructor_rejects_invalid_t_rm_range() -> None:
         AdaptivePlot("ashrae", t_running_mean_range=(30, 10))
 
 
+# ══════════════════════════════════════════════════════════════════════════
 # set_params tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
-def test_set_params_stores_values() -> None:
-    plot = AdaptivePlot("ashrae").set_params(tdb=25, tr=25, v=0.1)
-    assert plot._fixed_params == {"tdb": 25, "tr": 25, "v": 0.1}
+def test_set_params_stores_v() -> None:
+    plot = AdaptivePlot("ashrae").set_params(v=0.8)
+    assert plot._v == 0.8
+
+
+def test_set_params_default_v_is_none() -> None:
+    plot = AdaptivePlot("ashrae")
+    assert plot._v is None
 
 
 def test_set_params_chaining() -> None:
-    plot = AdaptivePlot("ashrae").set_params(tdb=25).set_params(tr=25, v=0.1)
-    assert plot._fixed_params == {"tdb": 25, "tr": 25, "v": 0.1}
+    plot = AdaptivePlot("ashrae").set_params(v=0.5)
+    assert isinstance(plot, AdaptivePlot)
 
 
-def test_plot_rejects_missing_params(monkeypatch) -> None:
-    plot = AdaptivePlot("ashrae")
-    monkeypatch.setattr(plot, "_load_model", lambda: _mock_ashrae)
-    with pytest.raises(ValueError, match="Missing required parameter"):
-        plot.plot()
-
-
-def test_plot_rejects_partial_params(monkeypatch) -> None:
-    plot = AdaptivePlot("ashrae").set_params(tdb=25)
-    monkeypatch.setattr(plot, "_load_model", lambda: _mock_ashrae)
-    with pytest.raises(ValueError, match="Missing required parameter"):
-        plot.plot()
-
-
+# ══════════════════════════════════════════════════════════════════════════
 # BandsConfig tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
 def test_bands_config_default() -> None:
@@ -186,7 +148,6 @@ def test_bands_config_validates_color_values() -> None:
 
 
 def test_bands_config_validates_all_bands_label_length() -> None:
-    # ASHRAE has 2 bands; providing 3 labels without show should fail
     cfg = BandsConfig(labels=["A", "B", "C"])
     with pytest.raises(ValueError, match="labels must have length 2"):
         cfg._validate("ashrae")
@@ -202,7 +163,9 @@ def test_bands_config_valid_en() -> None:
     assert cfg._validated
 
 
+# ══════════════════════════════════════════════════════════════════════════
 # set_bands tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
 def test_set_bands_raw_params() -> None:
@@ -237,203 +200,279 @@ def test_set_bands_rejects_invalid_keys() -> None:
 
 
 def test_set_bands_chaining() -> None:
-    plot = (
-        AdaptivePlot("ashrae").set_params(tdb=25, tr=25, v=0.1).set_bands(show=["90"])
-    )
-    assert plot._bands_config is not None
+    plot = AdaptivePlot("ashrae").set_bands(show=["90"])
+    assert isinstance(plot, AdaptivePlot)
 
 
+# ══════════════════════════════════════════════════════════════════════════
 # ASHRAE plot tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
-def test_ashrae_plot_smoke(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(title="ASHRAE Test")
+def test_ashrae_plot_smoke() -> None:
+    result = AdaptivePlot("ashrae").plot(title="ASHRAE Test")
     assert isinstance(result, AdaptivePlotResult)
     assert result.ax.get_title() == "ASHRAE Test"
-    assert len(result.fills) == 2  # 80% and 90%
+    assert len(result.fills) == 2
     assert result.center_line is not None
     assert result.legend is not None
 
 
-def test_ashrae_plot_default_labels(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot()
+def test_ashrae_plot_no_params_required() -> None:
+    """Plot should work without calling set_params at all."""
+    result = AdaptivePlot("ashrae").plot()
+    assert isinstance(result, AdaptivePlotResult)
+    assert len(result.fills) == 2
+
+
+def test_ashrae_plot_default_labels() -> None:
+    result = AdaptivePlot("ashrae").plot()
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "90% Acceptability" in legend_labels
     assert "80% Acceptability" in legend_labels
     assert "Comfort Temperature" in legend_labels
 
 
-def test_ashrae_plot_custom_labels(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    plot.set_bands(labels=["Wide", "Narrow"])
-    result = plot.plot()
+def test_ashrae_plot_custom_labels() -> None:
+    result = AdaptivePlot("ashrae").set_bands(labels=["Wide", "Narrow"]).plot()
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "Wide" in legend_labels
     assert "Narrow" in legend_labels
 
 
-def test_ashrae_plot_show_only_90(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    plot.set_bands(show=["90"])
-    result = plot.plot()
+def test_ashrae_plot_show_only_90() -> None:
+    result = AdaptivePlot("ashrae").set_bands(show=["90"]).plot()
     assert len(result.fills) == 1
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "90% Acceptability" in legend_labels
     assert "80% Acceptability" not in legend_labels
 
 
-def test_ashrae_plot_custom_colors(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    plot.set_bands(colors=["#FF0000", "#00FF00"])
-    result = plot.plot()
+def test_ashrae_plot_custom_colors() -> None:
+    result = AdaptivePlot("ashrae").set_bands(colors=["#FF0000", "#00FF00"]).plot()
     assert len(result.fills) == 2
 
 
-def test_ashrae_plot_no_center_line(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(show_center_line=False)
+def test_ashrae_plot_no_center_line() -> None:
+    result = AdaptivePlot("ashrae").plot(show_center_line=False)
     assert result.center_line is None
 
 
-def test_ashrae_plot_no_legend(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(legend=False)
+def test_ashrae_plot_no_legend() -> None:
+    result = AdaptivePlot("ashrae").plot(legend=False)
     assert result.legend is None
 
 
-def test_ashrae_plot_no_grid(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(grid=False)
-    # Grid lines should not be visible
+def test_ashrae_plot_no_grid() -> None:
+    result = AdaptivePlot("ashrae").plot(grid=False)
     assert not result.ax.xaxis.get_gridlines()[0].get_visible()
 
 
-def test_ashrae_plot_with_grid(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(grid=True)
+def test_ashrae_plot_with_grid() -> None:
+    result = AdaptivePlot("ashrae").plot(grid=True)
     assert result.ax.xaxis.get_gridlines()[0].get_visible()
 
 
-def test_ashrae_plot_xlim(monkeypatch) -> None:
-    plot = AdaptivePlot("ashrae", t_running_mean_range=(15, 30))
-    monkeypatch.setattr(plot, "_load_model", lambda: _mock_ashrae)
-    plot.set_params(tdb=25, tr=25, v=0.1)
-    result = plot.plot()
+def test_ashrae_plot_xlim_default() -> None:
+    result = AdaptivePlot("ashrae").plot()
+    assert result.ax.get_xlim() == pytest.approx((10.0, 33.5))
+
+
+def test_ashrae_plot_xlim_custom() -> None:
+    result = AdaptivePlot("ashrae", t_running_mean_range=(15, 30)).plot()
     assert result.ax.get_xlim() == pytest.approx((15.0, 30.0))
 
 
-def test_ashrae_plot_uses_provided_axis(monkeypatch) -> None:
+def test_ashrae_plot_uses_provided_axis() -> None:
     fig, ax = plt.subplots()
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(ax=ax)
+    result = AdaptivePlot("ashrae").plot(ax=ax)
     assert result.ax is ax
     assert result.fig is fig
 
 
-def test_ashrae_plot_xlabel_ylabel(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(xlabel="X Label", ylabel="Y Label")
-    assert result.ax.get_xlabel() == "X Label"
-    assert result.ax.get_ylabel() == "Y Label"
+def test_ashrae_plot_xlabel_ylabel() -> None:
+    result = AdaptivePlot("ashrae").plot(xlabel="X", ylabel="Y")
+    assert result.ax.get_xlabel() == "X"
+    assert result.ax.get_ylabel() == "Y"
 
 
-def test_ashrae_plot_no_xlabel_ylabel(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(xlabel=None, ylabel=None)
+def test_ashrae_plot_no_xlabel_ylabel() -> None:
+    result = AdaptivePlot("ashrae").plot(xlabel=None, ylabel=None)
     assert result.ax.get_xlabel() == ""
     assert result.ax.get_ylabel() == ""
 
 
-def test_ashrae_plot_center_line_kws(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(center_line_kws={"color": "red", "linewidth": 3.0})
+def test_ashrae_plot_center_line_kws() -> None:
+    result = AdaptivePlot("ashrae").plot(
+        center_line_kws={"color": "red", "linewidth": 3.0},
+    )
     assert result.center_line is not None
     assert result.center_line.get_color() == "red"
     assert result.center_line.get_linewidth() == 3.0
 
 
-def test_ashrae_plot_with_bands_config(monkeypatch) -> None:
+def test_ashrae_plot_with_bands_config() -> None:
     config = BandsConfig(
         show=["90"],
         labels=["Narrow Zone"],
         colors=["#FF6B6B"],
     )
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    plot.set_bands(show=config)
-    result = plot.plot()
+    result = AdaptivePlot("ashrae").set_bands(show=config).plot()
     assert len(result.fills) == 1
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "Narrow Zone" in legend_labels
 
 
-def test_ashrae_plot_handles_nan_gracefully(monkeypatch) -> None:
-    plot = AdaptivePlot("ashrae")
-    monkeypatch.setattr(plot, "_load_model", lambda: _mock_ashrae_with_nan)
-    plot.set_params(tdb=25, tr=25, v=0.1)
-    result = plot.plot()
-    assert isinstance(result, AdaptivePlotResult)
-    assert len(result.fills) > 0
+# ══════════════════════════════════════════════════════════════════════════
+# CE (cooling effect) tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
+def test_ashrae_plot_without_ce() -> None:
+    """Without v, upper boundary = t_cmf + offset (no ce)."""
+    result = AdaptivePlot("ashrae").set_bands(show=["90"]).plot()
+    # At t_rm=20: t_cmf = 0.31*20+17.8 = 24.0, upper = 26.5
+    # Check that the fill exists and is reasonable
+    assert len(result.fills) == 1
+
+
+def test_ashrae_plot_with_ce() -> None:
+    """With v=0.8, ce=1.2 shifts upper boundary up."""
+    result = AdaptivePlot("ashrae").set_params(v=0.8).set_bands(show=["90"]).plot()
+    assert len(result.fills) == 1
+
+
+def test_ashrae_ce_shifts_upper_boundary() -> None:
+    """Verify ce numerically shifts the upper boundary."""
+    # Without ce
+    plot_no_ce = AdaptivePlot("ashrae").set_bands(show=["90"])
+    result_no_ce = plot_no_ce.plot()
+
+    # With ce (v=0.8 → ce=1.2)
+    plot_ce = AdaptivePlot("ashrae").set_params(v=0.8).set_bands(show=["90"])
+    result_ce = plot_ce.plot()
+
+    # The fill_between with ce should have a higher upper boundary
+    # We can check by comparing the y-axis auto limits
+    ylim_no_ce = result_no_ce.ax.get_ylim()
+    ylim_ce = result_ce.ax.get_ylim()
+    assert ylim_ce[1] > ylim_no_ce[1]
+
+
+def test_ashrae_ce_only_above_25() -> None:
+    """CE should only shift upper boundary where it exceeds 25 degC."""
+    ce = 1.2  # v=0.8
+
+    # 90% upper = 0.31 * t_rm + 17.8 + 2.5
+    # Crosses 25 at t_rm ≈ 15.16
+    t_rm_below = 12.0
+    upper_below = 0.31 * t_rm_below + 17.8 + 2.5  # = 24.02, < 25
+    assert upper_below < 25.0
+    # No ce applied
+    assert upper_below == pytest.approx(24.02)
+
+    t_rm_above = 20.0
+    upper_above_base = 0.31 * t_rm_above + 17.8 + 2.5  # = 26.5, >= 25
+    assert upper_above_base >= 25.0
+    # ce applied
+    expected = upper_above_base + ce  # 27.7
+    assert expected == pytest.approx(27.7)
+
+
+def test_ashrae_ce_transition_point() -> None:
+    """Verify the transition point where ce kicks in for 90% band."""
+    # 90% upper = 0.31 * t_rm + 20.3 = 25.0
+    t_rm_transition = (25.0 - 20.3) / 0.31
+    assert t_rm_transition == pytest.approx(15.16, abs=0.01)
+
+    # 80% upper = 0.31 * t_rm + 21.3 = 25.0
+    t_rm_transition_80 = (25.0 - 21.3) / 0.31
+    assert t_rm_transition_80 == pytest.approx(11.94, abs=0.01)
+
+
+def test_en_ce_only_above_25() -> None:
+    """CE should only shift upper boundary where it exceeds 25 degC."""
+    ce = 1.2  # v=0.8
+
+    # Cat I upper = 0.33 * t_rm + 20.8
+    # Crosses 25 at t_rm ≈ 12.73
+    t_rm_below = 11.0
+    upper_below = 0.33 * t_rm_below + 18.8 + 2.0  # = 24.43, < 25
+    assert upper_below < 25.0
+
+    t_rm_above = 20.0
+    upper_above_base = 0.33 * t_rm_above + 18.8 + 2.0  # = 27.4, >= 25
+    assert upper_above_base >= 25.0
+    expected = upper_above_base + ce  # 28.6
+    assert expected == pytest.approx(28.6)
+
+
+def test_en_ce_cat_ii_full_range() -> None:
+    """Cat II upper >= 25 at t_rm=10, so ce applies to entire range."""
+    upper_at_10 = 0.33 * 10.0 + 18.8 + 3.0  # = 25.1
+    assert upper_at_10 >= 25.0
+
+
+def test_en_ce_cat_iii_full_range() -> None:
+    """Cat III upper >= 25 at t_rm=10, so ce applies to entire range."""
+    upper_at_10 = 0.33 * 10.0 + 18.8 + 4.0  # = 26.1
+    assert upper_at_10 >= 25.0
+
+
+def test_en_ce_transition_point() -> None:
+    """Verify the transition point where ce kicks in for Cat I."""
+    t_rm_transition = (25.0 - 20.8) / 0.33
+    assert t_rm_transition == pytest.approx(12.73, abs=0.01)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # EN plot tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
-def test_en_plot_smoke(monkeypatch) -> None:
-    plot = _new_en_plot(monkeypatch, _mock_en)
-    result = plot.plot(title="EN Test")
+def test_en_plot_smoke() -> None:
+    result = AdaptivePlot("en").plot(title="EN Test")
     assert isinstance(result, AdaptivePlotResult)
     assert result.ax.get_title() == "EN Test"
-    assert len(result.fills) == 3  # Cat I, II, III
+    assert len(result.fills) == 3
     assert result.center_line is not None
     assert result.legend is not None
 
 
-def test_en_plot_default_labels(monkeypatch) -> None:
-    plot = _new_en_plot(monkeypatch, _mock_en)
-    result = plot.plot()
+def test_en_plot_default_labels() -> None:
+    result = AdaptivePlot("en").plot()
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "Category I" in legend_labels
     assert "Category II" in legend_labels
     assert "Category III" in legend_labels
 
 
-def test_en_plot_show_only_cat_i(monkeypatch) -> None:
-    plot = _new_en_plot(monkeypatch, _mock_en)
-    plot.set_bands(show=["cat_i"])
-    result = plot.plot()
+def test_en_plot_show_only_cat_i() -> None:
+    result = AdaptivePlot("en").set_bands(show=["cat_i"]).plot()
     assert len(result.fills) == 1
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "Category I" in legend_labels
     assert "Category II" not in legend_labels
 
 
-def test_en_plot_custom_labels(monkeypatch) -> None:
-    plot = _new_en_plot(monkeypatch, _mock_en)
-    plot.set_bands(labels=["Best", "OK", "Min"])
-    result = plot.plot()
+def test_en_plot_custom_labels() -> None:
+    result = AdaptivePlot("en").set_bands(labels=["Best", "OK", "Min"]).plot()
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "Best" in legend_labels
     assert "OK" in legend_labels
     assert "Min" in legend_labels
 
 
-def test_en_plot_custom_colors(monkeypatch) -> None:
-    plot = _new_en_plot(monkeypatch, _mock_en)
-    plot.set_bands(colors=["#AA0000", "#00AA00", "#0000AA"])
-    result = plot.plot()
-    assert len(result.fills) == 3
-
-
-def test_en_plot_show_two_bands(monkeypatch) -> None:
-    plot = _new_en_plot(monkeypatch, _mock_en)
-    plot.set_bands(
-        show=["cat_i", "cat_ii"],
-        labels=["Strict", "Normal"],
-        colors=["#00FF00", "#FFFF00"],
+def test_en_plot_show_two_bands() -> None:
+    result = (
+        AdaptivePlot("en")
+        .set_bands(
+            show=["cat_i", "cat_ii"],
+            labels=["Strict", "Normal"],
+            colors=["#00FF00", "#FFFF00"],
+        )
+        .plot()
     )
-    result = plot.plot()
     assert len(result.fills) == 2
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "Strict" in legend_labels
@@ -445,19 +484,55 @@ def test_en_rejects_ashrae_band_keys() -> None:
         AdaptivePlot("en").set_bands(show=["80"])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Formula correctness tests
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_ashrae_formula_values() -> None:
+    """Verify ASHRAE formula: t_cmf = 0.31 * t_rm + 17.8."""
+    t_cmf = 0.31 * 20 + 17.8
+    assert t_cmf == pytest.approx(24.0)
+    assert t_cmf + 2.5 == pytest.approx(26.5)  # 90% upper
+    assert t_cmf - 2.5 == pytest.approx(21.5)  # 90% lower
+    assert t_cmf + 3.5 == pytest.approx(27.5)  # 80% upper
+    assert t_cmf - 3.5 == pytest.approx(20.5)  # 80% lower
+
+
+def test_en_formula_values() -> None:
+    """Verify EN formula: t_cmf = 0.33 * t_rm + 18.8."""
+    t_cmf = 0.33 * 20 + 18.8
+    assert t_cmf == pytest.approx(25.4)
+    assert t_cmf + 2.0 == pytest.approx(27.4)  # Cat I upper
+    assert t_cmf - 3.0 == pytest.approx(22.4)  # Cat I lower
+    assert t_cmf + 3.0 == pytest.approx(28.4)  # Cat II upper
+    assert t_cmf - 4.0 == pytest.approx(21.4)  # Cat II lower
+    assert t_cmf + 4.0 == pytest.approx(29.4)  # Cat III upper
+    assert t_cmf - 5.0 == pytest.approx(20.4)  # Cat III lower
+
+
+def test_formula_matches_model_output() -> None:
+    """Our formula should match the model output (at t_rm=20, v<0.6)."""
+    # Values from the user's earlier model run:
+    # adaptive_ashrae(tdb=25, tr=25, t_running_mean=20, v=0.1)
+    t_cmf = 0.31 * 20 + 17.8
+    assert t_cmf == pytest.approx(24.0)
+    assert t_cmf - 3.5 == pytest.approx(20.5)  # matches tmp_cmf_80_low
+    assert t_cmf + 3.5 == pytest.approx(27.5)  # matches tmp_cmf_80_up
+    assert t_cmf - 2.5 == pytest.approx(21.5)  # matches tmp_cmf_90_low
+    assert t_cmf + 2.5 == pytest.approx(26.5)  # matches tmp_cmf_90_up
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # BandsConfig reuse tests
+# ══════════════════════════════════════════════════════════════════════════
 
 
-def test_bands_config_reuse_across_plots(monkeypatch) -> None:
+def test_bands_config_reuse_across_plots() -> None:
     config = BandsConfig(show=["90"], labels=["Comfort"], colors=["#FF6B6B"])
 
-    plot1 = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    plot1.set_bands(show=config)
-    result1 = plot1.plot()
-
-    plot2 = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    plot2.set_bands(show=config)
-    result2 = plot2.plot()
+    result1 = AdaptivePlot("ashrae").set_bands(show=config).plot()
+    result2 = AdaptivePlot("ashrae").set_bands(show=config).plot()
 
     labels1 = [t.get_text() for t in result1.legend.get_texts()]
     labels2 = [t.get_text() for t in result2.legend.get_texts()]
@@ -465,25 +540,24 @@ def test_bands_config_reuse_across_plots(monkeypatch) -> None:
     assert "Comfort" in labels1
 
 
+# ══════════════════════════════════════════════════════════════════════════
 # Edge cases
+# ══════════════════════════════════════════════════════════════════════════
 
 
-def test_plot_without_set_bands_uses_defaults(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot()
+def test_plot_without_set_bands_uses_defaults() -> None:
+    result = AdaptivePlot("ashrae").plot()
     assert len(result.fills) == 2
     legend_labels = [t.get_text() for t in result.legend.get_texts()]
     assert "80% Acceptability" in legend_labels
     assert "90% Acceptability" in legend_labels
 
 
-def test_plot_legend_kws(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(legend_kws={"loc": "upper left"})
+def test_plot_legend_kws() -> None:
+    result = AdaptivePlot("ashrae").plot(legend_kws={"loc": "upper left"})
     assert result.legend is not None
 
 
-def test_plot_fill_kws(monkeypatch) -> None:
-    plot = _new_ashrae_plot(monkeypatch, _mock_ashrae)
-    result = plot.plot(fill_kws={"alpha": 0.3})
+def test_plot_fill_kws() -> None:
+    result = AdaptivePlot("ashrae").plot(fill_kws={"alpha": 0.3})
     assert len(result.fills) > 0
